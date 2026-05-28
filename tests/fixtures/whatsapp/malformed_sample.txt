@@ -1,0 +1,5 @@
+orphan line at start with no header
+28/05/26, 11:00 - Ali: hello
+not a real header but looks weird 13/13/99 99:99 garbage
+28/05/26, 99:99 - Bad: bad timestamp here
+28/05/26, 11:01 - Ali: ok second message

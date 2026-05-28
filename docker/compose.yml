@@ -1,0 +1,101 @@
+# trade-intel docker compose stack (P7.3).
+#
+# Services:
+#   postgres  — DB backing the API (volume-persisted)
+#   qdrant    — vector store (Phase 4+ upgrade path from FAISS, D-003)
+#   migrate   — one-shot: runs `alembic upgrade head` against postgres
+#   api       — FastAPI service
+#   worker    — Go ingestion daemon (D-005)
+#
+# Run:
+#   docker compose -f docker/compose.yml up --build
+#
+# Stop + remove volumes:
+#   docker compose -f docker/compose.yml down -v
+#
+# The `migrate` service runs once and exits; `api` waits for it to
+# complete via `depends_on.migrate.condition: service_completed_successfully`.
+# Re-running compose triggers an idempotent re-migration (alembic is a no-op
+# at HEAD).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trade_intel_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trade}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trade}
+      POSTGRES_DB: ${POSTGRES_DB:-trade_intel}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trade} -d ${POSTGRES_DB:-trade_intel}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: trade_intel_qdrant
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    container_name: trade_intel_migrate
+    environment:
+      ENVIRONMENT: prod
+      POSTGRES_URL: postgresql+psycopg://${POSTGRES_USER:-trade}:${POSTGRES_PASSWORD:-trade}@postgres:5432/${POSTGRES_DB:-trade_intel}
+      API_KEY: ${API_KEY:-changeme-dev-key}
+      DEBUG: "false"
+      API_RELOAD: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+      args:
+        INSTALL_ML: "${INSTALL_ML:-false}"
+    container_name: trade_intel_api
+    environment:
+      ENVIRONMENT: prod
+      POSTGRES_URL: postgresql+psycopg://${POSTGRES_USER:-trade}:${POSTGRES_PASSWORD:-trade}@postgres:5432/${POSTGRES_DB:-trade_intel}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_KEY: ${API_KEY:-changeme-dev-key}
+      DEBUG: "false"
+      API_RELOAD: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+    container_name: trade_intel_worker
+    environment:
+      TRADE_INTEL_API_URL: http://api:8000
+      WORKER_POLL_SECONDS: "30"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  qdrant-data:

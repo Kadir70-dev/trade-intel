@@ -1,0 +1,55 @@
+# Keep the docker build context lean and PII-safe.
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtualenv (rebuilt inside the image)
+.venv/
+venv/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Project data (potential PII)
+data/raw/
+data/processed/
+data/samples/
+data/vectors/
+data/*.db
+data/*.sqlite*
+
+# Test fixtures are not needed at runtime
+tests/
+
+# Git + CI
+.git/
+.github/
+.gitignore
+
+# Local config
+.env
+.env.local
+
+# Memory + docs (rebuilt out-of-band)
+docs/
+*.md
+!README.md
+DECISIONS.md
+ARCHITECTURE.md
+TASKS.md
+PROJECT_STATE.json
+
+# Docker context shouldn't include sibling docker artifacts twice
+docker/compose.yml
