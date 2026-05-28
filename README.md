@@ -169,3 +169,4 @@ curl -sX POST localhost:8000/match -d '{"query":"15pm 256 sealed"}'
 ## Licence
 
 Proprietary. © trade-intel.
+# trade-intel
