@@ -21,6 +21,10 @@ from trade_intel.normalization.products import (
     ProductMatch,
     extract_products,
 )
+from trade_intel.normalization.structured import (
+    StructuredFields,
+    extract_structured,
+)
 from trade_intel.normalization.text import (
     casefold_for_match,
     normalize_text,
@@ -35,9 +39,11 @@ __all__ = [
     "CanonicalProduct",
     "ProductMatch",
     "SenderIdentity",
+    "StructuredFields",
     "casefold_for_match",
     "extract_identity",
     "extract_products",
+    "extract_structured",
     "normalize_sender_name",
     "normalize_text",
     "strip_noise",

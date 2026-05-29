@@ -269,8 +269,12 @@ def test_score_match_stale_post_drops_to_c() -> None:
 
 
 def test_score_match_clamps_semantic_to_unit_interval() -> None:
-    inv = StubInventory(posted_at=NOW)
-    dem = StubDemand()
+    """The raw embedder score must be clamped to ``[0, 1]`` before the
+    relation-floor max is applied. Use a product name that's NOT in
+    the canonical registry so relation_score is 0 and the clamp is
+    the only contributor to ``result.semantic``."""
+    inv = StubInventory(normalized_product="__not_in_registry_inv__", posted_at=NOW)
+    dem = StubDemand(normalized_product="__not_in_registry_dem__")
     over = score_match(inv, dem, semantic_score=1.5, now=NOW)
     under = score_match(inv, dem, semantic_score=-0.5, now=NOW)
     assert 0.0 <= over.semantic <= 1.0

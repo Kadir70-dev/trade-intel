@@ -75,6 +75,29 @@ class Settings(BaseSettings):
     vector_store_type: VectorStoreType = VectorStoreType.FAISS
     faiss_index_dir: Path = PROJECT_ROOT / "data" / "vectors"
 
+    # LLM (local inference via Ollama — no paid APIs)
+    llm_enabled: bool = True
+    ollama_host: str = "http://127.0.0.1:11434"
+    llm_model: str = "qwen3:4b"
+    llm_fallback_model: str = "hermes3"
+    #: Hard ceiling on context tokens. Small = low RAM. 4096 fits a broker
+    #: turn (system + a handful of candidate facts + answer) comfortably.
+    llm_num_ctx: int = Field(default=4096, ge=512, le=32768)
+    #: Generation cap. Broker replies are short (ranking + one WhatsApp msg).
+    llm_num_predict: int = Field(default=512, ge=64, le=4096)
+    #: CPU threads for inference. 0 = let Ollama pick (defaults to core count).
+    llm_num_thread: int = Field(default=0, ge=0, le=256)
+    #: Unload the model from RAM after this idle window. Short keep_alive on a
+    #: cheap VPS frees ~3 GB between requests; "-1" pins it resident.
+    llm_keep_alive: str = "5m"
+    #: Per-request wall-clock budget (s). CPU inference is slow; be generous.
+    llm_timeout: float = Field(default=120.0, gt=0)
+    #: Sampling — low temp keeps the broker grounded and terse.
+    llm_temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    #: Low-RAM mode: trims context + disables KV-cache bloat knobs. Surfaced
+    #: as a single switch for the "cheap VPS" target.
+    llm_low_ram: bool = True
+
     # API
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)

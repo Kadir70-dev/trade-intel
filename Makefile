@@ -141,6 +141,23 @@ run-cli: ## Run the trader CLI (Phase 5)
 shell: ## Open a Python REPL with the package importable
 	@$(PYTHON)
 
+# ── Go broker backend (primary chat backend, local Ollama) ──────────
+.PHONY: broker broker-serve broker-health chat
+broker: ## Build the Go broker binary -> bin/broker (static, CGO-free)
+	@printf "$(CYAN)==> building Go broker$(RESET)\n"
+	@mkdir -p bin
+	@cd worker && CGO_ENABLED=0 go build -o ../bin/broker ./cmd/broker
+	@printf "$(GREEN)built bin/broker$(RESET)\n"
+
+broker-serve: broker ## Run the broker HTTP API + SSE streaming server
+	@./bin/broker serve
+
+broker-health: broker ## One-shot Ollama reachability probe
+	@./bin/broker --healthcheck
+
+chat: broker ## Launch the AI broker chat REPL (Go backend + local Ollama)
+	@./bin/broker chat
+
 ## Quality gates
 .PHONY: smoke-test verify preflight
 smoke-test: ## Quick boot smoke: settings + engine + SELECT 1

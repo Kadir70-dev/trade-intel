@@ -76,5 +76,9 @@ __MACOSX/
 # ── Build artifacts ────────────────────────────────────────────────
 *.whl
 
+# ── Go broker binary (build with `make broker`) ────────────────────
+/bin/
+worker/bin/
+
 # ── Jupyter ────────────────────────────────────────────────────────
 .ipynb_checkpoints/

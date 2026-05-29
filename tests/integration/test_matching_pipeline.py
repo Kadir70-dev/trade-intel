@@ -71,6 +71,10 @@ def _ingest(session: Session, lines: list[str]) -> None:
 def test_embedding_text_for_inventory_includes_product_and_storage(
     session: Session,
 ) -> None:
+    """P8.6: embedding text is product-centric — product + storage only.
+    Condition / location are intentionally NOT in the text; they are
+    handled by :func:`compute_spec_fit` instead.
+    """
     inv = Inventory(
         normalized_product="iPhone 12 Pro Max",
         storage="256GB",
@@ -80,8 +84,9 @@ def test_embedding_text_for_inventory_includes_product_and_storage(
     text = embedding_text_for_inventory(inv)
     assert text.startswith("iPhone 12 Pro Max")
     assert "storage=256GB" in text
-    assert "condition=sealed" in text
-    assert "location=dxb" in text
+    # Condition + location intentionally OMITTED — spec_fit handles them.
+    assert "condition" not in text
+    assert "location" not in text
 
 
 def test_embedding_text_for_demand_includes_only_present_fields() -> None:

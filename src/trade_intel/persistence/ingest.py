@@ -66,7 +66,12 @@ from trade_intel.db.models import (
     Seller,
     SourceType,
 )
-from trade_intel.normalization import SenderIdentity, extract_products
+from trade_intel.normalization import (
+    SenderIdentity,
+    StructuredFields,
+    extract_products,
+    extract_structured,
+)
 from trade_intel.parsers import (
     DedupSet,
     ParsedMessage,
@@ -184,6 +189,7 @@ def ingest_messages(
 
             intent_result = classify_intent(parsed.normalized_message)
             product_matches = extract_products(parsed.normalized_message)
+            structured = extract_structured(parsed.normalized_message)
 
             seller_id, buyer_id = _resolve_sender(
                 session=session,
@@ -213,6 +219,7 @@ def ingest_messages(
 
             _write_product_rows(
                 session=session,
+                structured=structured,
                 message=msg,
                 products=product_matches,
                 intent_result=intent_result,
@@ -513,12 +520,19 @@ def _write_product_rows(
     message: Message,
     products,
     intent_result: IntentResult,
+    structured: StructuredFields,
     seller_id: int | None,
     buyer_id: int | None,
     posted_at,
     stats: IngestStats,
 ) -> None:
-    """Insert Inventory (SELLER) or Demand (BUYER) rows per product match."""
+    """Insert Inventory (SELLER) or Demand (BUYER) rows per product match.
+
+    Structured fields (storage / qty / price / condition / location /
+    variant) extracted from the message body are folded onto every row
+    so matcher spec_fit + evidence_weight signals can rise above the
+    baseline 0.5 floor (P8.6 production tuning).
+    """
     if not products:
         return
     intent = intent_result.intent
@@ -531,6 +545,14 @@ def _write_product_rows(
                     brand=pm.canonical.brand or None,
                     product_raw=pm.surface,
                     normalized_product=pm.canonical.canonical_name,
+                    variant=structured.variant,
+                    storage=structured.storage,
+                    condition=structured.condition,
+                    quantity=structured.quantity,
+                    quantity_raw=structured.quantity_raw,
+                    price_aed=structured.price_aed,
+                    price_raw=structured.price_raw,
+                    location=structured.location,
                     posted_at=posted_at,
                     is_active=True,
                 )
@@ -545,6 +567,11 @@ def _write_product_rows(
                     brand=pm.canonical.brand or None,
                     product_raw=pm.surface,
                     normalized_product=pm.canonical.canonical_name,
+                    storage=structured.storage,
+                    quantity=structured.quantity,
+                    quantity_raw=structured.quantity_raw,
+                    budget_aed=structured.price_aed,
+                    location=structured.location,
                     posted_at=posted_at,
                     urgency=intent_result.urgency,
                     is_active=True,

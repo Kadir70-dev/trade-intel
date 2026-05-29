@@ -139,6 +139,7 @@ def _build_seller() -> None:
         "available",
         "availability",
         "avail",
+        "av",
         "stock ready",
         "in stock",
         "ready stock",
@@ -153,6 +154,19 @@ def _build_seller() -> None:
         "fresh lot",
         "in hand",
         "stock in hand",
+        # Wholesale-trader shorthand (UAE Deira / Sharjah / Bur Dubai).
+        # MOQ ("Minimum Order Quantity") is essentially seller-only language.
+        "moq",
+        "min order",
+        "minimum order",
+        "bulk available",
+        "wholesale",
+        "wholesale price",
+        "price aed",
+        "supplier",
+        "ready to dispatch",
+        "ready to ship",
+        "ready for pickup",
     )
     weak = (
         "qty",
@@ -163,6 +177,7 @@ def _build_seller() -> None:
         "fresh",
         "stock",
         "stocks",
+        "stk",
         "selling",
         "sell",
         "sale",
@@ -172,6 +187,16 @@ def _build_seller() -> None:
         "sealed",
         "box pack",
         "boxpack",
+        "pcs",
+        "bulk",
+        "each",
+        # UAE grey-market / regional sourcing slang.
+        "jv",  # joint-venture / parallel-import stock
+        "actv",  # active stock shorthand
+        "open box",
+        "used",
+        "refurb",
+        "refurbished",
     )
     for kw in strong:
         _add(kw, "seller", 2.0)

@@ -52,6 +52,7 @@ from trade_intel.db.models import (
     SourceType,
     Urgency,
 )
+from trade_intel.llm import BrokerAssistant
 from trade_intel.matching import build_inventory_index
 from trade_intel.ml import HashEmbedder
 from trade_intel.parsers import parse_csv, parse_excel, parse_file
@@ -585,52 +586,265 @@ def ping(
 # ---------------------------------------------------------------- chat
 
 
-@app.command()
-def chat(
-    k: int = typer.Option(5, "-k", help="Top-K results per query"),
-) -> None:
-    """Simple interactive REPL — type a query, get semantic matches.
+def _render_broker(resp, *, as_json: bool) -> None:
+    """Print one :class:`BrokerResponse` to the console."""
+    if as_json:
+        print_json(console, resp.as_dict())
+        return
+    if resp.note:
+        console.print(f"[dim]{resp.note}[/dim]")
+    console.print(resp.answer_text)
+    if resp.llm is not None:
+        meta = resp.llm
+        console.print(
+            f"\n[dim]· {meta.model} · {meta.tokens_per_second:.1f} tok/s · "
+            f"{meta.total_duration_s:.1f}s · {meta.completion_tokens} tokens[/dim]"
+        )
 
-    v1 is intentionally tiny: a while-loop reading lines, running each
-    through the inventory matcher. Type ``exit`` (or Ctrl-D) to quit.
+
+@app.command()
+def ask(
+    query: str = typer.Argument(..., help="Free-text trader request"),
+    k: int = typer.Option(5, "-k", help="Top-K suppliers to consider"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """One-shot AI broker: buyer request -> ranked suppliers -> WhatsApp draft.
+
+    The matcher is the source of truth; the local LLM (Ollama) only reasons
+    over the verified candidate facts. Falls back to a deterministic template
+    reply if the model is unreachable.
     """
     embedder = HashEmbedder()
+    with session_scope() as session:
+        assistant = BrokerAssistant(session=session, embedder=embedder, k=k)
+        resp = assistant.answer(query)
+    _render_broker(resp, as_json=as_json)
+
+
+def _go_broker_bin() -> Path | None:
+    """Locate the Go broker binary (the primary backend).
+
+    Resolution order: ``TRADE_INTEL_BROKER_BIN`` env var, then ``bin/broker``
+    at the project root. Returns None when not built so the CLI can fall back
+    to the in-process Python REPL.
+    """
+    import os
+
+    from trade_intel.config import PROJECT_ROOT
+
+    override = os.environ.get("TRADE_INTEL_BROKER_BIN")
+    candidates = [Path(override)] if override else []
+    candidates.append(PROJECT_ROOT / "bin" / "broker")
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+_DEFAULT_BROKER_URL = "http://localhost:8088"
+
+
+def _broker_health(url: str, *, timeout: float = 1.5) -> dict | None:
+    """Probe ``GET {url}/healthz``. Returns the parsed payload, or None if the
+    broker server isn't reachable."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/healthz", timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _sse_chat_turn(
+    url: str, session_id: str, query: str, model: str | None, *, timeout: float
+) -> dict | None:
+    """Stream one turn from the broker server's SSE endpoint.
+
+    Prints token chunks live as they arrive (interactive feel) and returns the
+    final ``done`` payload (full Response) for the footer, or None on error.
+    """
+    import json
+    import urllib.request
+
+    payload: dict = {"session": session_id, "query": query}
+    if model:
+        payload["model"] = model
+    req = urllib.request.Request(
+        url.rstrip("/") + "/chat/stream",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+    )
+
+    event: str | None = None
+    data_lines: list[str] = []
+    final: dict | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").rstrip("\n")
+                if line == "":  # blank line = dispatch the accumulated event
+                    data = "\n".join(data_lines)
+                    if event == "status":
+                        # connection established; model is evaluating (CPU TTFT)
+                        console.print("[dim]…generating[/dim]")
+                    elif event == "token":
+                        print(data, end="", flush=True)
+                    elif event == "error":
+                        console.print(f"\n[red]broker error:[/red] {data}")
+                    elif event == "done":
+                        try:
+                            final = json.loads(data)
+                        except Exception:
+                            final = None
+                    event, data_lines = None, []
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    d = line[5:]
+                    if d[:1] == " ":  # SSE: strip exactly one leading space
+                        d = d[1:]
+                    data_lines.append(d)
+    except (EOFError, KeyboardInterrupt):
+        raise
+    except Exception as e:  # network / server failure mid-stream
+        console.print(f"\n[red]stream failed:[/red] {e}")
+        return None
+    print()  # newline after the streamed answer
+    return final
+
+
+def _run_http_chat(url: str, model: str | None, health: dict, k: int) -> None:
+    """Interactive REPL that talks to the running Go broker server over HTTP."""
+    import os
+
+    eff = health.get("effective") or model or health.get("model") or "?"
+    status = health.get("status", "ok")
     console.print(
-        "[bold green]trade-intel chat[/bold green] — "
-        "type a query, [dim]exit[/dim] to quit.\n"
+        f"[bold green]trade-intel chat[/bold green] — UAE wholesale AI broker "
+        f"[dim](Go backend @ {url} · model={eff})[/dim]"
+    )
+    if status == "using_fallback":
+        console.print(
+            f"[yellow]Primary model not pulled — auto-using fallback "
+            f"'{health.get('fallback')}'.[/yellow]"
+        )
+    elif status == "no_model_available":
+        console.print(
+            f"[red]Neither '{health.get('model')}' nor '{health.get('fallback')}' "
+            f"is pulled. Run e.g. `ollama pull {health.get('model')}`. "
+            f"Replies will use the deterministic template until then.[/red]"
+        )
+    elif status == "ollama_unreachable":
+        console.print("[red]Ollama is unreachable — replies use the template fallback.[/red]")
+    console.print("[dim]exit[/dim] to quit, [dim]/reset[/dim] to clear memory.\n")
+
+    # Generous client timeout: CPU inference is slow and time-to-first-token can
+    # be minutes on a contended laptop. Match the server default (240s) plus
+    # headroom so the client never gives up before the server does.
+    try:
+        llm_timeout = float(os.environ.get("LLM_TIMEOUT", "240"))
+    except ValueError:
+        llm_timeout = 240.0
+    timeout = llm_timeout + 60.0
+
+    session_id, reset_n = "cli", 0
+    while True:
+        try:
+            line = typer.prompt(">", default="", show_default=False)
+        except (EOFError, KeyboardInterrupt, typer.Abort):
+            console.print()
+            break
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower() in ("exit", "quit", "/quit", "/exit"):
+            break
+        if line.lower() == "/reset":
+            reset_n += 1
+            session_id = f"cli-{reset_n}"  # fresh server-side history
+            console.print("[dim][memory cleared][/dim]")
+            continue
+        final = _sse_chat_turn(url, session_id, line, model, timeout=timeout)
+        if final:
+            note = final.get("note")
+            if note:
+                console.print(f"[dim]{note}[/dim]")
+            if final.get("llm_used"):
+                console.print(
+                    f"[dim]· {final.get('model')} · "
+                    f"{final.get('tokens_per_sec', 0):.1f} tok/s[/dim]"
+                )
+        console.print()
+
+
+@app.command()
+def chat(
+    k: int = typer.Option(5, "-k", help="Top-K suppliers per query"),
+) -> None:
+    """Interactive AI broker REPL.
+
+    Resolution order:
+
+    1. **HTTP client** to a running Go broker server (``make broker-serve``) at
+       ``BROKER_URL`` (default ``http://localhost:8088``) — streams over SSE.
+    2. **Local Go binary** (``bin/broker``) if no server is reachable.
+    3. **In-process Python REPL** if the Go binary isn't built.
+
+    The model is chosen via ``OLLAMA_MODEL`` (or ``LLM_MODEL``); the server
+    default is ``llama3.2:3b`` with ``qwen3:4b`` as fallback.
+
+    Each line is a trader request. Type ``exit`` (or Ctrl-D) to quit.
+    """
+    import os
+
+    broker_url_env = os.environ.get("BROKER_URL")
+    broker_url = broker_url_env or _DEFAULT_BROKER_URL
+    model = os.environ.get("OLLAMA_MODEL") or os.environ.get("LLM_MODEL")
+
+    # 1. Prefer a running broker server (HTTP + SSE streaming).
+    health = _broker_health(broker_url)
+    if health is not None:
+        _run_http_chat(broker_url, model, health, k)
+        return
+    if broker_url_env:
+        console.print(
+            f"[yellow]Broker server at {broker_url} not reachable — "
+            f"falling back to local backend.[/yellow]"
+        )
+
+    # 2. Local Go binary: hand off the whole REPL to it.
+    go_bin = _go_broker_bin()
+    if go_bin is not None:
+        env = dict(os.environ)
+        env.setdefault("TRADE_INTEL_TOPK", str(k))
+        os.execve(str(go_bin), [str(go_bin), "chat"], env)  # replaces process
+
+    # 3. In-process Python REPL (no Go backend built).
+    embedder = HashEmbedder()
+    console.print(
+        "[dim]No broker server or Go binary found (try `make broker-serve`); "
+        "using in-process Python REPL.[/dim]\n"
+        "[bold green]trade-intel chat[/bold green] — UAE wholesale AI broker. "
+        "[dim]exit[/dim] to quit.\n"
     )
     with session_scope() as session:
-        index, _ = build_inventory_index(session, embedder=embedder)
-        if index.size == 0:
-            console.print(
-                "[yellow]Inventory index is empty.[/yellow] "
-                "Run `trade-intel parse <file>` first.\n"
-            )
-            return
+        assistant = BrokerAssistant(session=session, embedder=embedder, k=k)
         while True:
             try:
                 line = typer.prompt(">", default="", show_default=False)
-            except (EOFError, KeyboardInterrupt):
+            except (EOFError, KeyboardInterrupt, typer.Abort):
                 console.print()
                 break
             line = line.strip()
             if not line or line.lower() in ("exit", "quit", "/quit", "/exit"):
                 break
-            vec = embedder.encode([line])[0]
-            hits = index.search(vec, k=k)
-            rows: list = []
-            for inv_id, score in hits:
-                inv = session.get(Inventory, inv_id)
-                if inv is None:
-                    continue
-                rows.append([inv_id, _fmt_score(score), inv.normalized_product])
-            print_table(
-                console=console,
-                title=f"Top {k} for {line!r}",
-                columns=["id", "score", "product"],
-                rows=rows,
-                empty_message="No hits.",
-            )
+            resp = assistant.answer(line)
+            _render_broker(resp, as_json=False)
+            console.print()
 
 
 # ---------------------------------------------------------------- run-matcher
@@ -640,6 +854,15 @@ def chat(
 def run_matcher(
     k: int = typer.Option(10, "-k"),
     min_grade: str = typer.Option("C", "--min-grade"),
+    now_str: str | None = typer.Option(
+        None,
+        "--now",
+        help=(
+            "Anchor recency to this ISO timestamp instead of wall-clock now. "
+            "Use 'auto' to anchor to max(Inventory.posted_at) — handy when "
+            "scoring a historical export so recency doesn't STALE every row."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     """Score every active Demand against the current inventory index.
@@ -650,7 +873,17 @@ def run_matcher(
     if min_grade not in _GRADE_BY_NAME:
         raise typer.BadParameter("min-grade must be one of A+ / A / B / C")
     embedder = HashEmbedder()
-    now = datetime.now(UTC).replace(tzinfo=None)
+    if now_str is None:
+        now = datetime.now(UTC).replace(tzinfo=None)
+    elif now_str == "auto":
+        now = None  # resolved per-session below
+    else:
+        try:
+            now = datetime.fromisoformat(now_str).replace(tzinfo=None)
+        except ValueError as e:
+            raise typer.BadParameter(
+                f"--now must be 'auto' or an ISO-8601 timestamp ({e})"
+            ) from e
     total = {
         "demands_scored": 0,
         "matches_created": 0,
@@ -664,6 +897,9 @@ def run_matcher(
         if index.size == 0:
             console.print("[yellow]Inventory index is empty.[/yellow]")
             return
+        if now is None:  # --now=auto
+            anchor = session.scalar(select(func.max(Inventory.posted_at)))
+            now = anchor or datetime.now(UTC).replace(tzinfo=None)
         demands = list(
             session.scalars(
                 select(Demand).where(Demand.is_active.is_(True))

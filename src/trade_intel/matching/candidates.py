@@ -8,11 +8,15 @@ and writes Match rows.
 Embedding text shape — kept consistent across both sides so the
 embedder sees comparable inputs::
 
-    "<canonical_product> | storage=<s> | condition=<c> | location=<loc>"
+    "<canonical_product> | storage=<s>"
 
-Empty fields are dropped. The canonical product is always the leading
-token because it dominates the embedding signal and Phase 4 matching
-is product-centric.
+Product + storage together define the effective SKU. Condition and
+location are negotiation / logistics dimensions handled separately by
+:func:`compute_spec_fit` so they're intentionally **not** in the
+embedding text — keeping them out stabilizes the semantic signal under
+both HashEmbedder (deterministic noise) and MiniLM (cleaner gradient).
+The canonical product is always the leading token because it dominates
+the embedding signal and matching is product-centric.
 """
 
 from __future__ import annotations
@@ -34,26 +38,23 @@ if TYPE_CHECKING:
 
 
 def embedding_text_for_inventory(inv: Inventory) -> str:
-    """Build the canonical text string for an Inventory row's embedding."""
+    """Build the canonical text string for an Inventory row's embedding.
+
+    Product-centric: includes only ``normalized_product`` + ``storage``
+    (the two SKU-defining fields). Condition / location are
+    intentionally omitted — :func:`compute_spec_fit` handles those.
+    """
     parts: list[str] = [inv.normalized_product]
     if inv.storage:
         parts.append(f"storage={inv.storage}")
-    if inv.condition is not None:
-        parts.append(f"condition={inv.condition.value}")
-    if inv.location:
-        parts.append(f"location={inv.location}")
     return " | ".join(parts)
 
 
 def embedding_text_for_demand(dem: Demand) -> str:
-    """Build the canonical text string for a Demand row's embedding."""
+    """Mirror of :func:`embedding_text_for_inventory` — product-centric."""
     parts: list[str] = [dem.normalized_product]
     if dem.storage:
         parts.append(f"storage={dem.storage}")
-    if dem.condition is not None:
-        parts.append(f"condition={dem.condition.value}")
-    if dem.location:
-        parts.append(f"location={dem.location}")
     return " | ".join(parts)
 
 

@@ -53,13 +53,28 @@ from trade_intel.normalization.text import casefold_for_match
 
 @dataclass(frozen=True, slots=True)
 class CanonicalProduct:
-    """Typed identity of a product."""
+    """Typed identity of a product.
+
+    ``series`` (added P8.7) is a coarse SKU-family key — products that
+    share a series are variants of the same model line (e.g. ``iPhone
+    15`` / ``iPhone 15 Pro`` / ``iPhone 15 Pro Max`` all share series
+    ``"Apple|iPhone|15"``). Used by :func:`~trade_intel.matching.scoring.product_relation_score`
+    to floor the semantic score for in-family matches so HashEmbedder
+    noise can't tank an obviously-related pair.
+
+    ``category`` is even coarser — phones group together, accessories
+    group together, etc. Distinct from ``family`` because the family is
+    a brand-specific line ("iPhone" vs "Galaxy"), while the category
+    is industry-level ("phone" vs "accessory").
+    """
 
     canonical_name: str
     brand: str
     family: str
     model: str | None = None
     generic: bool = False
+    series: str | None = None
+    category: str = ""
 
 
 # ---------------------------------------------------------------- registry
@@ -98,6 +113,7 @@ _IPHONE_MINI_GENS: Final[tuple[int, ...]] = (12, 13)
 
 def _build_iphones() -> None:
     for gen in _IPHONE_GENS:
+        series = f"Apple|iPhone|{gen}"
         _register(
             [f"iphone {gen}", f"iphone{gen}"],
             CanonicalProduct(
@@ -105,6 +121,8 @@ def _build_iphones() -> None:
                 brand="Apple",
                 family="iPhone",
                 model=str(gen),
+                series=series,
+                category="phone",
             ),
         )
         _register(
@@ -127,6 +145,8 @@ def _build_iphones() -> None:
                 brand="Apple",
                 family="iPhone",
                 model=f"{gen} Pro Max",
+                series=series,
+                category="phone",
             ),
         )
         _register(
@@ -145,6 +165,8 @@ def _build_iphones() -> None:
                 brand="Apple",
                 family="iPhone",
                 model=f"{gen} Pro",
+                series=series,
+                category="phone",
             ),
         )
 
@@ -163,6 +185,8 @@ def _build_iphones() -> None:
                 brand="Apple",
                 family="iPhone",
                 model=f"{gen} Plus",
+                series=f"Apple|iPhone|{gen}",
+                category="phone",
             ),
         )
 
@@ -180,6 +204,8 @@ def _build_iphones() -> None:
                 brand="Apple",
                 family="iPhone",
                 model=f"{gen} Mini",
+                series=f"Apple|iPhone|{gen}",
+                category="phone",
             ),
         )
 
@@ -225,6 +251,8 @@ def _build_ipads() -> None:
                 brand="Apple",
                 family="iPad",
                 model=f"Mini {gen}",
+                series=f"Apple|iPad|Mini|{gen}",
+                category="tablet",
             ),
         )
 
@@ -244,6 +272,8 @@ def _build_ipads() -> None:
                 brand="Apple",
                 family="iPad",
                 model=f"Air {gen}",
+                series=f"Apple|iPad|Air|{gen}",
+                category="tablet",
             ),
         )
 
@@ -261,6 +291,8 @@ def _build_ipads() -> None:
                 brand="Apple",
                 family="iPad",
                 model=f"Pro {chip_upper}",
+                series=f"Apple|iPad|Pro|{chip_upper}",
+                category="tablet",
             ),
         )
 
@@ -274,13 +306,153 @@ def _build_generic() -> None:
         family="Tablet",
         model=None,
         generic=True,
+        category="tablet",
     )
     _register(["tabs", "tab", "tablet", "tablets"], tablets)
+
+
+def _build_accessories() -> None:
+    """Generic accessory buckets — cases / covers / chargers / cables.
+
+    UAE wholesale traders frequently move accessories in bulk ("iPhone
+    cases all models, MOQ 20 pcs"). Without a canonical product entry
+    these messages skip ``_write_product_rows`` and never land in
+    Inventory. Generic flag is set so downstream callers can tell a
+    "Phone Cases" line apart from a SKU-specific iPhone 15 Pro Max line.
+    """
+    cases = CanonicalProduct(
+        canonical_name="Phone Cases",
+        brand="",
+        family="Accessories",
+        model=None,
+        generic=True,
+        category="accessory",
+    )
+    _register(
+        [
+            "phone case",
+            "phone cases",
+            "mobile case",
+            "mobile cases",
+            "iphone case",
+            "iphone cases",
+            "case",
+            "cases",
+        ],
+        cases,
+    )
+    covers = CanonicalProduct(
+        canonical_name="Phone Covers",
+        brand="",
+        family="Accessories",
+        model=None,
+        generic=True,
+        category="accessory",
+    )
+    _register(
+        [
+            "phone cover",
+            "phone covers",
+            "mobile cover",
+            "mobile covers",
+            "back cover",
+            "back covers",
+            "iphone cover",
+            "iphone covers",
+            "cover",
+            "covers",
+        ],
+        covers,
+    )
+    accessories = CanonicalProduct(
+        canonical_name="Accessories",
+        brand="",
+        family="Accessories",
+        model=None,
+        generic=True,
+        category="accessory",
+    )
+    _register(
+        ["accessory", "accessories", "phone accessories", "mobile accessories"],
+        accessories,
+    )
+    chargers = CanonicalProduct(
+        canonical_name="Chargers",
+        brand="",
+        family="Accessories",
+        model=None,
+        generic=True,
+        category="accessory",
+    )
+    _register(
+        [
+            "charger",
+            "chargers",
+            "charging cable",
+            "charging cables",
+            "phone charger",
+            "phone chargers",
+        ],
+        chargers,
+    )
+
+
+def _build_android_phones() -> None:
+    """Coarse Android brand buckets. Wholesale traders post Android by
+    brand + series ("Xiaomi Redmi covers all models") far more often
+    than by exact SKU, so a generic brand entry catches the most common
+    surface forms. SKU-level expansion can land later when labelled
+    data exists.
+    """
+    xiaomi_redmi = CanonicalProduct(
+        canonical_name="Xiaomi Redmi",
+        brand="Xiaomi",
+        family="Redmi",
+        model=None,
+        generic=True,
+        category="phone",
+    )
+    _register(
+        ["xiaomi redmi", "redmi", "xiaomi", "mi phone", "mi phones"],
+        xiaomi_redmi,
+    )
+    samsung = CanonicalProduct(
+        canonical_name="Samsung",
+        brand="Samsung",
+        family="",
+        model=None,
+        generic=True,
+        category="phone",
+    )
+    _register(
+        ["samsung", "samsung phone", "samsung phones", "galaxy"],
+        samsung,
+    )
+    huawei = CanonicalProduct(
+        canonical_name="Huawei",
+        brand="Huawei",
+        family="",
+        model=None,
+        generic=True,
+        category="phone",
+    )
+    _register(["huawei", "huawei phone", "huawei phones"], huawei)
+    oppo = CanonicalProduct(
+        canonical_name="Oppo",
+        brand="Oppo",
+        family="",
+        model=None,
+        generic=True,
+        category="phone",
+    )
+    _register(["oppo", "oppo phone", "oppo phones"], oppo)
 
 
 _build_iphones()
 _build_ipads()
 _build_generic()
+_build_accessories()
+_build_android_phones()
 
 
 # ---------------------------------------------------------------- public
