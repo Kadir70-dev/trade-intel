@@ -82,3 +82,4 @@ worker/bin/
 
 # ── Jupyter ────────────────────────────────────────────────────────
 .ipynb_checkpoints/
+!.env.prod.example

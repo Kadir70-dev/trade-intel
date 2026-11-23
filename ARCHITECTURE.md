@@ -181,6 +181,24 @@ Run: `uvicorn trade_intel.api.main:app --reload` → Swagger at `http://127.0.0.
 
 Auth: when `API_KEY` env var is set, every non-public endpoint requires `X-API-Key: <key>` header (401 on miss/wrong). When unset (dev), the API runs open. Prod environments are rejected at boot if `api_key` is None (see `Settings._enforce_prod_safety`).
 
+## Dashboard, Imports & VPS Topology (Phase 9)
+
+```
+browser ──HTTPS──► caddy (80/443, only public port)
+                     └► api (FastAPI)  X-API-Key on every data route
+                          ├─ POST /ingest   uploader+file → imports row → parse → dedup → ingest
+                          │                  └ background: rescore demand↔inventory → matches_written
+                          ├─ GET  /dashboard/{summary,imports,opportunities}
+                          └─ POST /chat/stream ──SSE──► broker (Go) ─► facts bridge (python, DB)
+                                                                   └► ollama (local model; skipped if 0 candidates)
+postgres / redis / broker / ollama: internal network only (no published ports)
+```
+
+- `imports` table = audit trail: uploader (whitelist `IMPORT_UPLOADERS`), filename (sanitised), format, sha256, byte size, seen/inserted/duplicate/skipped counts, inventory/demand rows, matches written, status (`running → matching → completed | failed | match_failed`).
+- Upload safety: bytes stream to a server-named `mkstemp` file, never a client path; size cap; extension whitelist; temp file always unlinked.
+- Chat grounding: the broker only ranks rows returned by the DB-backed facts bridge; with zero candidates the LLM is not called.
+- Dashboard shell (`/`) is public but data-free; all JSON/SSE routes require the key.
+
 ## Configuration
 
 All env-driven via `pydantic-settings` (Phase 2):

@@ -1,0 +1,23 @@
+# Public edge. Automatic HTTPS (Let's Encrypt) for {$DOMAIN}; DNS A record must
+# point at this VPS and ports 80/443 must be reachable.
+{$DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 30MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+		-Server
+	}
+	# flush_interval -1 keeps SSE chat tokens streaming instead of buffering.
+	reverse_proxy api:8000 {
+		flush_interval -1
+		transport http {
+			response_header_timeout 15m
+		}
+	}
+}

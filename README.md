@@ -98,6 +98,17 @@ When models change, generate a new migration:
 
 `make preflight` runs `alembic check` to guarantee zero drift between ORM models and migrations.
 
+## Dashboard & VPS deployment (Phase 9)
+
+Open `/` on the API, enter the API key, upload WhatsApp `.txt`, `.csv` or `.xlsx` exports (pick uploader: Main / Yaseen). Each import is recorded with counts; duplicates are skipped; matching runs automatically; ranked buyer↔seller opportunities and the broker chat (local Ollama via the Go broker) are on the same page.
+
+```bash
+cp .env.prod.example .env.prod      # fill DOMAIN, API_KEY, POSTGRES_PASSWORD; chmod 600; never commit
+docker compose --env-file .env.prod -f docker/compose.prod.yml up -d --build
+```
+
+Only Caddy publishes ports (80/443, automatic HTTPS; the domain's A record must point at the VPS). Postgres, Redis, broker and Ollama are internal. Ollama pulls `OLLAMA_MODEL` on first start (`ollama-pull`); give the VPS enough RAM (about 4 GB for `llama3.2:3b`). Nothing is ever sent to WhatsApp automatically; drafts are text only.
+
 ## Make commands
 
 `make help` is the canonical list. Highlights:

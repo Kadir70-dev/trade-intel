@@ -41,6 +41,8 @@ class IngestResponse(BaseModel):
     filename: str
     matcher_scheduled: bool
     stats: dict[str, int]
+    import_id: int | None = None
+    uploader: str | None = None
 
 
 # ---------- messages ----------

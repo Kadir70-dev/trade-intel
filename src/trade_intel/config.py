@@ -111,6 +111,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Dashboard / imports
+    import_uploaders: str = Field(
+        default="Main,Yaseen",
+        description="Comma-separated uploader names accepted by the import form.",
+    )
+    max_upload_mb: int = Field(default=25, ge=1, le=200)
+    broker_url: str = "http://127.0.0.1:8088"
+
+    @property
+    def uploader_names(self) -> list[str]:
+        return [n.strip() for n in self.import_uploaders.split(",") if n.strip()]
+
     @field_validator("sqlite_url")
     @classmethod
     def _validate_sqlite_url(cls, v: str) -> str:

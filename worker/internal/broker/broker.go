@@ -82,9 +82,9 @@ func (a *Assistant) Answer(ctx context.Context, query string, history []string) 
 	resp.WhatsApp = whatsapp
 	block := BuildAnswer(res, whatsapp) // deterministic ranking + WhatsApp (always)
 
-	if !a.cfg.LLMEnabled {
+	if !a.cfg.LLMEnabled || len(res.Candidate) == 0 {
 		resp.Answer = block
-		resp.Note = "deterministic ranking (LLM disabled)"
+		resp.Note = noLLMNote(res, a.cfg.LLMEnabled)
 		return resp, nil
 	}
 
@@ -145,9 +145,9 @@ func (a *Assistant) AnswerStream(ctx context.Context, query string, history []st
 	resp.WhatsApp = whatsapp
 	block := BuildAnswer(res, whatsapp) // deterministic ranking + WhatsApp (always)
 
-	if !a.cfg.LLMEnabled {
+	if !a.cfg.LLMEnabled || len(res.Candidate) == 0 {
 		resp.Answer = block
-		resp.Note = "deterministic ranking (LLM disabled)"
+		resp.Note = noLLMNote(res, a.cfg.LLMEnabled)
 		onChunk(block)
 		return resp, nil
 	}
@@ -182,4 +182,17 @@ func (a *Assistant) AnswerStream(ctx context.Context, query string, history []st
 		resp.Note = "primary model unavailable — used fallback " + out.Model
 	}
 	return resp, nil
+}
+
+// noLLMNote explains why the deterministic block was returned without the LLM.
+// With zero candidates the model is never called: with no evidence it could
+// only invent suppliers, so the grounded "no matching stock" reply is final.
+func noLLMNote(res *facts.Result, llmEnabled bool) string {
+	if len(res.Candidate) == 0 {
+		return "no matching stock in imported data (LLM skipped)"
+	}
+	if !llmEnabled {
+		return "deterministic ranking (LLM disabled)"
+	}
+	return "deterministic ranking"
 }

@@ -19,6 +19,7 @@ Background tasks (P6.3):
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from trade_intel import __version__
+from trade_intel.api.dashboard import dashboard_router, mount_dashboard_ui
 from trade_intel.api.schemas import (
     BriefResponse,
     BriefSummary,
@@ -67,6 +69,7 @@ from trade_intel.db import get_db, session_scope
 from trade_intel.db.models import (
     Buyer,
     Demand,
+    ImportRecord,
     IntentType,
     Inventory,
     LeadPipeline,
@@ -78,14 +81,16 @@ from trade_intel.db.models import (
     SourceType,
     Urgency,
 )
+from trade_intel.imports import (
+    UploadTooLargeError,
+    run_import,
+    run_matching,
+    safe_filename,
+    spool_upload,
+)
 from trade_intel.matching import build_inventory_index
 from trade_intel.matching.candidates import build_demand_index
 from trade_intel.ml import HashEmbedder
-from trade_intel.parsers import parse_csv, parse_excel, parse_file
-from trade_intel.persistence import (
-    ingest_messages,
-    match_demand_against_inventory,
-)
 
 log = get_logger(__name__, component="api")
 
@@ -103,7 +108,9 @@ def require_api_key(submitted: str | None = Security(_API_KEY_HEADER)) -> None:
     configured = get_settings().api_key
     if not configured:
         return
-    if submitted != configured:
+    if not submitted or not hmac.compare_digest(
+        submitted.encode(), configured.encode()
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid or missing API key",
@@ -151,6 +158,8 @@ def create_app() -> FastAPI:
     app.include_router(_match_router(), dependencies=[Depends(require_api_key)])
     app.include_router(_leads_router(), dependencies=[Depends(require_api_key)])
     app.include_router(_brief_router(), dependencies=[Depends(require_api_key)])
+    app.include_router(dashboard_router(), dependencies=[Depends(require_api_key)])
+    mount_dashboard_ui(app)
     return app
 
 
@@ -186,37 +195,6 @@ def _resolve_source_type(filename: str, hint: str | None) -> SourceType:
     return fmt
 
 
-def _matcher_background_job() -> None:
-    """Rescore every active Demand against the current inventory index.
-
-    Runs in a fresh session — :class:`BackgroundTasks` invokes after the
-    HTTP response has been flushed, so the request's session is gone.
-    """
-    embedder = HashEmbedder()
-    now = datetime.now(UTC).replace(tzinfo=None)
-    with session_scope() as session:
-        index, _ = build_inventory_index(session, embedder=embedder)
-        if index.size == 0:
-            log.info("matcher_background_skipped_empty_index")
-            return
-        demands = list(
-            session.scalars(
-                select(Demand).where(Demand.is_active.is_(True))
-            ).all()
-        )
-        scored = 0
-        for demand in demands:
-            match_demand_against_inventory(
-                demand,
-                session=session,
-                embedder=embedder,
-                inventory_index=index,
-                now=now,
-            )
-            scored += 1
-        log.info("matcher_background_completed", demands_scored=scored)
-
-
 def _ingest_router() -> APIRouter:
     router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -226,48 +204,68 @@ def _ingest_router() -> APIRouter:
         file: UploadFile = File(...),
         source_type: str | None = Form(default=None),
         group_name: str | None = Form(default=None),
+        uploader: str | None = Form(default=None),
         run_matcher: bool = Query(default=False),
     ) -> IngestResponse:
         if file.filename is None:
             raise HTTPException(status_code=400, detail="filename required")
-        st = _resolve_source_type(file.filename, source_type)
+        settings = get_settings()
+        display_name = safe_filename(file.filename)
+        st = _resolve_source_type(display_name, source_type)
 
-        # Spool to a temp file so the parsers (which expect a path / file
-        # handle that supports seek) can read it; UploadFile.file is a
-        # SpooledTemporaryFile which works directly.
-        contents = await file.read()
-        tmp_path = Path("/tmp") / f"ingest_{datetime.now(UTC).timestamp()}_{file.filename}"
-        tmp_path.write_bytes(contents)
+        allowed = settings.uploader_names
+        who = (uploader or "").strip() or "api"
+        if uploader and allowed and who not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"uploader must be one of {allowed}",
+            )
 
         try:
-            if st is SourceType.WHATSAPP:
-                parsed = parse_file(tmp_path)
-            elif st is SourceType.CSV:
-                parsed = parse_csv(tmp_path)
-            elif st is SourceType.EXCEL:
-                parsed = parse_excel(tmp_path)
-            else:  # pragma: no cover — guarded by _resolve_source_type
-                raise HTTPException(status_code=400, detail=f"unsupported {st!r}")
+            tmp_path, sha, size = await spool_upload(
+                file, source_type=st, max_bytes=settings.max_upload_mb * 1024 * 1024
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        if size == 0:
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="empty file")
 
-            with session_scope() as session:
-                stats = ingest_messages(
-                    parsed,
-                    session=session,
-                    source_type=st,
-                    group_name=group_name,
-                    source_path=file.filename,
-                )
+        try:
+            import_id, stats = run_import(
+                tmp_path,
+                filename=display_name,
+                source_type=st,
+                uploader=who,
+                sha256=sha,
+                size=size,
+                group_name=group_name,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("import_failed", filename=display_name)
+            raise HTTPException(
+                status_code=422, detail=f"could not parse {display_name}: {exc}"
+            ) from exc
         finally:
             tmp_path.unlink(missing_ok=True)
 
         if run_matcher:
-            background.add_task(_matcher_background_job)
+            background.add_task(run_matching, import_id)
+        else:
+            with session_scope() as session:
+                rec = session.get(ImportRecord, import_id)
+                if rec is not None:
+                    rec.status = "completed"
 
         return IngestResponse(
             source_type=st,
-            filename=file.filename,
+            filename=display_name,
             matcher_scheduled=run_matcher,
-            stats=stats.as_dict(),
+            stats=stats,
+            import_id=import_id,
+            uploader=who,
         )
 
     return router

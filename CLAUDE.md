@@ -439,6 +439,12 @@ Dev/test: ANSI pretty + rich tracebacks. Prod (`ENVIRONMENT=prod`): single-line 
 
 Remaining Phase 2 artifacts (Makefile, etc.) land in P2.6–P2.7.
 
+## Dashboard & Imports (Phase 9 — live on branch, not deployed)
+
+- Code: `api/dashboard.py`, `api/static/`, `imports/service.py`, `db/models/import_record.py`, migration `a1c4e7d90b21`, `docker/compose.prod.yml` + `broker.Dockerfile` + `Caddyfile`.
+- Rules: never expose postgres/redis/broker/ollama ports; never commit `.env.prod`; uploads never use client paths; `/ingest` default `run_matcher=false` (API contract), dashboard passes `true`.
+- Matching is NOT validated on real data until Main/Yaseen exports are imported — do not claim otherwise.
+
 ## Session Continuity Checklist
 
 When a new session begins:

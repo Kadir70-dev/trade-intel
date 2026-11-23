@@ -15,6 +15,7 @@ from trade_intel.db.models.enums import (
     VectorEntityType,
 )
 from trade_intel.db.models.group import Group
+from trade_intel.db.models.import_record import ImportRecord
 from trade_intel.db.models.inventory import Inventory
 from trade_intel.db.models.lead_pipeline import LeadPipeline
 from trade_intel.db.models.match import Match
@@ -30,6 +31,7 @@ __all__ = [
     "Embedding",
     "Grade",
     "Group",
+    "ImportRecord",
     "IntentType",
     "Inventory",
     "LeadPipeline",
