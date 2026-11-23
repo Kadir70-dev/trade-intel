@@ -1,7 +1,7 @@
 {
   "project": "trade-intel",
-  "current_phase": "PHASE_9_VPS_DASHBOARD_IMPLEMENTED_NOT_DEPLOYED",
-  "next_phase": "DEPLOY_AND_REAL_DATA_VALIDATION",
+  "current_phase": "PHASE_9_DEPLOYED_AWAITING_REAL_DATA",
+  "next_phase": "REAL_DATA_VALIDATION",
   "completed_tasks": [
     "P1.1_create_memory_files",
     "P1.2_design_folder_structure",
@@ -54,7 +54,6 @@
   "in_progress_tasks": [],
   "pending_tasks": [],
   "blocked_tasks": [
-    "DEPLOY: need VPS host/domain/SSH from user",
     "VALIDATE: real Main+Yaseen exports not imported yet"
   ],
   "current_branch": "codex/vps-dashboard-chat-20261123",
@@ -225,6 +224,10 @@
     {
       "date": "2026-11-23",
       "summary": "Built imports audit trail, safe multi-upload, dashboard UI, SSE chat proxy, prod compose with Caddy HTTPS. Not deployed; not validated on real exports."
+    },
+    {
+      "date": "2026-11-23",
+      "summary": "Deployed: API on VPS 189.72.154.112 via sam-edge Caddy, UI on Vercel trade-intel-ui.vercel.app. Key in /opt/trade-intel/.env.prod on VPS."
     }
   ]
 }
