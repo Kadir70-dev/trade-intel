@@ -84,6 +84,34 @@ preamble trim). For terse, format-strict output on small boxes, a non-reasoning
 model (`hermes3`, `llama3:8b`) or the deterministic template (`LLM_ENABLED=false`)
 is cleaner.
 
+## Redis cache (Phase 1)
+
+Repeated/similar broker queries are served from Redis instead of re-running the
+matcher + LLM. Measured on this box: a cold reply (~165 s with LLM) drops to
+**~2 ms on a cache hit**.
+
+Start Redis in pure-cache mode (bounded RAM, LRU eviction, no persistence —
+ideal for a cheap VPS):
+
+```bash
+redis-server --port 6379 --maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
+```
+
+- **Stdlib RESP client** — no Go module dependency; the binary stays static.
+- **Exact + fuzzy matching** — queries are reduced to a deterministic signature
+  (lowercase, punctuation/word-order/filler-insensitive) that preserves product
+  + quantity + urgency. "Need iPhone 16 Pro Max urgent" and "iphone 16 pro max,
+  need it URGENT!!" share one entry; a different qty makes a distinct one.
+- **TTL by urgency** — urgent 5 min, normal 15 min, insights 30 min (env-tunable).
+- **Invalidation on inventory update** — `POST /cache/invalidate` bumps a
+  namespace version (O(1), no SCAN); `trade-intel parse` pings it best-effort
+  after an ingest.
+- **Graceful fallback** — if Redis is down, reads miss and writes no-op; the
+  broker keeps serving uncached (`/healthz` shows `cache_healthy: false`).
+
+Caching is keyed on query-signature + model (not session), so the
+history-independent ranking + WhatsApp draft are shared across callers.
+
 ## Module layout (`worker/`)
 
 ```
@@ -93,5 +121,9 @@ internal/ollama/           stdlib Ollama client (generate + stream + fallback)
 internal/facts/            Python ML bridge (matcher = source of truth)
 internal/broker/           prompts + orchestration + grounded template fallback
 internal/session/          in-memory, bounded, concurrency-safe chat memory
+internal/cache/            stdlib Redis (RESP) reply cache + query signature
 internal/server/           HTTP API + SSE streaming + worker-pool concurrency
 ```
+
+HTTP endpoints: `GET /healthz`, `POST /chat`, `POST /chat/stream` (SSE),
+`POST /cache/invalidate`.

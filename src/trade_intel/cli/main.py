@@ -128,6 +128,9 @@ def parse(
             source_path=str(file),
         )
     payload = stats.as_dict()
+    # Inventory changed → invalidate the broker reply cache (best-effort).
+    if payload.get("inventory_inserted") or payload.get("demand_inserted"):
+        _invalidate_broker_cache()
     if as_json:
         print_json(console, payload)
         return
@@ -143,6 +146,141 @@ def parse(
         columns=["metric", "value"],
         rows=[[k, v] for k, v in payload.items()],
     )
+
+
+# ---------------------------------------------------------------- ocr
+
+
+@app.command()
+def ocr(
+    file: Path = typer.Argument(..., exists=True, readable=True),
+    seller: str | None = typer.Option(
+        None, "--seller", "-s", help="Dealer the stock is attributed to"
+    ),
+    engine: str | None = typer.Option(
+        None, "--engine", help="paddleocr | rapidocr | tesseract (default: auto)"
+    ),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help="auto (insert High+Medium, hold Low) | review (insert none) | all",
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """OCR a stock image / PDF (or parse Excel / CSV) into inventory rows.
+
+    Local OCR only (PaddleOCR → RapidOCR → Tesseract). High/Medium-confidence
+    rows are auto-inserted; Low-confidence rows are held for human review.
+    """
+    from trade_intel.ocr import import_stock
+
+    with session_scope() as session:
+        result = import_stock(
+            file, session=session, seller=seller, prefer_engine=engine, mode=mode
+        )
+    payload = result.as_dict()
+    if result.inserted:
+        _invalidate_broker_cache()  # inventory changed → drop stale broker cache
+
+    if as_json:
+        print_json(console, payload)
+        return
+
+    console.print(
+        f"[bold]{file.name}[/bold] · {result.file_type} · engine="
+        f"[cyan]{result.engine}[/cyan] · {result.lines_total} lines → "
+        f"{result.rows_extracted} rows "
+        f"([green]{result.counts.get('high', 0)} High[/green] / "
+        f"[yellow]{result.counts.get('medium', 0)} Medium[/yellow] / "
+        f"[red]{result.counts.get('low', 0)} Low[/red]) · "
+        f"[bold green]{result.inserted} inserted[/bold green]"
+    )
+    if result.rows:
+        print_table(
+            console=console,
+            title="Extracted inventory",
+            columns=["conf", "product", "qty", "price", "storage", "loc", "moq", "raw"],
+            rows=[
+                [
+                    r.confidence,
+                    r.product or "—",
+                    str(r.quantity) if r.quantity is not None else "—",
+                    f"{r.price_aed:g}" if r.price_aed is not None else "—",
+                    r.storage or "—",
+                    r.location or "—",
+                    str(r.moq) if r.moq is not None else "—",
+                    (r.raw_text[:32] + "…") if len(r.raw_text) > 33 else r.raw_text,
+                ]
+                for r in result.rows
+            ],
+        )
+    if result.pending_review:
+        console.print(
+            f"[yellow]⚠ {len(result.pending_review)} low-confidence row(s) "
+            f"held for review — re-run with --mode all to import.[/yellow]"
+        )
+
+
+# ---------------------------------------------------------------- trust
+
+
+@app.command()
+def trust(
+    recompute: bool = typer.Option(
+        True, "--recompute/--no-recompute", help="Recompute + persist trust scores"
+    ),
+    limit: int = typer.Option(20, "--limit", "-n"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Supplier trust leaderboard (0-100, A+/A/B/C/Risky).
+
+    Deterministic reputation from real behaviour — freshness, activity, LP
+    availability, quantity reliability, repeat listings, successful matches,
+    duplicate-spam + ghost penalties. Persisted to ``sellers.trust_score`` and
+    used (heavily) by the broker ranking. Cron-friendly like ``run-matcher``.
+    """
+    from datetime import UTC, datetime
+
+    from trade_intel.matching.trust import compute_trust, recompute_all
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with session_scope() as session:
+        if recompute:
+            scores = recompute_all(session, now=now)
+        else:
+            from trade_intel.db.models import Seller
+
+            sellers = (
+                session.query(Seller)
+                .order_by(Seller.trust_score.desc().nullslast())
+                .all()
+            )
+            scores = [compute_trust(s, session=session, now=now) for s in sellers]
+            scores.sort(key=lambda t: t.score, reverse=True)
+
+        spread = {g: sum(1 for t in scores if t.grade == g) for g in ("A+", "A", "B", "C", "Risky")}
+        top = scores[:limit]
+        if as_json:
+            print_json(
+                console,
+                {"recomputed": recompute, "total": len(scores), "spread": spread,
+                 "leaderboard": [t.as_dict() for t in top]},
+            )
+            return
+        console.print(
+            f"[bold]Supplier trust[/bold] · {len(scores)} sellers · "
+            + " ".join(f"{g}={spread[g]}" for g in ("A+", "A", "B", "C", "Risky"))
+            + ("  [dim](recomputed)[/dim]" if recompute else "")
+        )
+        print_table(
+            console=console,
+            title="Trust leaderboard",
+            columns=["grade", "score", "seller", "why"],
+            rows=[
+                [t.grade, f"{t.score:.0f}", t.seller[:30], ", ".join(t.reasons[:3])]
+                for t in top
+            ],
+        )
 
 
 # ---------------------------------------------------------------- match
@@ -644,6 +782,23 @@ def _go_broker_bin() -> Path | None:
 _DEFAULT_BROKER_URL = "http://localhost:8088"
 
 
+def _invalidate_broker_cache() -> None:
+    """Best-effort: tell a running Go broker server its cache is stale after an
+    inventory change. Silent no-op if no server is reachable."""
+    import os
+    import urllib.request
+
+    url = (os.environ.get("BROKER_URL") or _DEFAULT_BROKER_URL).rstrip("/")
+    try:
+        req = urllib.request.Request(
+            url + "/cache/invalidate", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=1.0):
+            pass
+    except Exception:
+        pass  # broker not running / cache off — ingestion still succeeded
+
+
 def _broker_health(url: str, *, timeout: float = 1.5) -> dict | None:
     """Probe ``GET {url}/healthz``. Returns the parsed payload, or None if the
     broker server isn't reachable."""
@@ -652,7 +807,8 @@ def _broker_health(url: str, *, timeout: float = 1.5) -> dict | None:
 
     try:
         with urllib.request.urlopen(url.rstrip("/") + "/healthz", timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
+            data = json.loads(r.read().decode("utf-8"))
+        return data if isinstance(data, dict) else None
     except Exception:
         return None
 

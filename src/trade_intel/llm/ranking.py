@@ -38,7 +38,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from trade_intel.db.models import Demand, Inventory, Urgency
+from trade_intel.db.models import Demand, Inventory
 from trade_intel.matching.scoring import (
     compute_recency_multiplier,
     product_relation_score,
@@ -68,11 +68,18 @@ def location_tier(loc: str | None) -> tuple[str, float]:
 # ---------------------------------------------------------------- reliability
 
 
-def reliability(post_count: int | None, trust_score: float | None) -> float:
-    """Supplier reliability in [0,1] — trust_score if earned, else post volume."""
+def trust01(trust_score: float | None, post_count: int | None) -> tuple[float, str]:
+    """Supplier trust as (0..1, grade). Uses the persisted 0-100 trust score
+    (Phase 3, ``trade-intel trust --recompute``) when available, else a
+    provisional estimate from posting volume so ranking still works before the
+    first recompute."""
+    from trade_intel.matching.trust import grade_for_trust
+
     if trust_score is not None:
-        return max(0.0, min(1.0, float(trust_score)))
-    return min(1.0, (post_count or 0) / 30.0)
+        s = max(0.0, min(100.0, float(trust_score)))
+        return s / 100.0, grade_for_trust(s)
+    provisional = min(60.0, (post_count or 0) * 1.5)  # cap provisional below A
+    return provisional / 100.0, grade_for_trust(provisional)
 
 
 # ---------------------------------------------------------------- freshness
@@ -115,14 +122,15 @@ def clean_seller(name: str | None) -> str:
 # ---------------------------------------------------------------- grade
 
 #: Trader-priority weights (sum ≈ 1.0). Additive so no single factor zeroes out.
-_W_PRODUCT = 0.35
-_W_FRESH = 0.20
-_W_QTY = 0.15
-_W_PRICE = 0.10
-_W_RELIABILITY = 0.08
-_W_LOCATION = 0.06
-_W_MOQ = 0.03
-_W_URGENCY = 0.03
+# Trader priority order (Phase 3): product match > freshness > TRUST > qty fit
+# > LP/price > MOQ > location. Trust is weighted 3rd — heavily, above qty/price.
+_W_PRODUCT = 0.32
+_W_FRESH = 0.22
+_W_TRUST = 0.18
+_W_QTY = 0.12
+_W_PRICE = 0.08
+_W_MOQ = 0.05
+_W_LOCATION = 0.03
 
 
 def broker_grade(
@@ -160,7 +168,7 @@ class RankedSupplier:
     location: str | None
     freshness: str
     match_type: str  # exact | similar | probable
-    grade: str       # A+ | A | B | C
+    grade: str       # A+ | A | B | C  (match grade)
     rank_score: float
     reason: str
     reasons: list[str] = field(default_factory=list)
@@ -169,6 +177,8 @@ class RankedSupplier:
     price_known: bool = False
     recent: bool = False
     location_tier: str = "unknown"
+    trust_score: float | None = None  # supplier reputation 0-100 (Phase 3)
+    trust_grade: str = "?"            # A+ | A | B | C | Risky
 
     def as_dict(self) -> dict:
         return {
@@ -192,6 +202,8 @@ class RankedSupplier:
             "price_known": self.price_known,
             "recent": self.recent,
             "location_tier": self.location_tier,
+            "trust_score": round(self.trust_score, 1) if self.trust_score is not None else None,
+            "trust_grade": self.trust_grade,
         }
 
 
@@ -219,7 +231,8 @@ def _age_phrase(posted_at: datetime | None, *, now: datetime) -> str:
 
 
 def rank_suppliers(
-    session: Session, dem: Demand, *, now: datetime, limit: int = 5
+    session: Session, dem: Demand, *, now: datetime, limit: int = 5,
+    apply_trust: bool = True,
 ) -> list[RankedSupplier]:
     """Product-aware retrieval + criteria-based ranking for one demand.
 
@@ -236,7 +249,6 @@ def rank_suppliers(
     invs = session.execute(stmt).scalars().all()
 
     dem_qty = dem.quantity
-    urgent = dem.urgency is Urgency.HIGH
 
     ranked: list[RankedSupplier] = []
     for inv in invs:
@@ -260,7 +272,7 @@ def rank_suppliers(
         qty_known = inv_qty is not None
         if dem_qty is None:
             qty_fit, qty_component = True, 1.0
-        elif qty_known:
+        elif inv_qty is not None:
             qty_fit = inv_qty >= dem_qty
             qty_component = 1.0 if qty_fit else 0.3
         else:
@@ -268,19 +280,19 @@ def rank_suppliers(
 
         price_known = inv.price_aed is not None
         loc_tier, loc_prox = location_tier(inv.location)
-        rel_score = reliability(post_count, trust)
+        trust_val, trust_grade = trust01(trust, post_count)
         product_quality = 1.0 if same else (0.6 if similar else 0.25)
-        urgency_component = 1.0 if (not urgent or recent) else 0.4
 
+        # Trader priority: product > freshness > trust > qty > LP > MOQ > location.
+        trust_term = _W_TRUST * trust_val if apply_trust else 0.0
         score = (
             _W_PRODUCT * product_quality
             + _W_FRESH * recency
+            + trust_term
             + _W_QTY * qty_component
             + _W_PRICE * (1.0 if price_known else 0.0)
-            + _W_RELIABILITY * rel_score
-            + _W_LOCATION * loc_prox
             + _W_MOQ * qty_component
-            + _W_URGENCY * urgency_component
+            + _W_LOCATION * loc_prox
         )
 
         grade = broker_grade(
@@ -314,6 +326,11 @@ def rank_suppliers(
             bullets.append(f"{inv.location} seller")
         if (post_count or 0) >= 20:
             bullets.append(f"established seller ({post_count} posts)")
+        # Supplier trust (Phase 3) — heavy signal, surface it prominently.
+        if trust is not None:
+            bullets.insert(1, f"trust {trust_grade} ({trust_val * 100:.0f})")
+        elif trust_grade == "Risky":
+            bullets.append("⚠ unproven seller")
 
         # One-line reason = the 2-3 highest-signal bullets.
         reason = ", ".join(bullets[:3])
@@ -340,6 +357,8 @@ def rank_suppliers(
                 price_known=price_known,
                 recent=recent,
                 location_tier=loc_tier,
+                trust_score=trust if trust is not None else round(trust_val * 100, 1),
+                trust_grade=trust_grade,
             )
         )
 
@@ -363,5 +382,5 @@ __all__ = [
     "freshness_tier",
     "location_tier",
     "rank_suppliers",
-    "reliability",
+    "trust01",
 ]

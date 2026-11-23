@@ -38,6 +38,14 @@ type Config struct {
 
 	// Chat memory
 	MaxHistoryTurns int // BROKER_MAX_HISTORY (turns kept per session)
+
+	// Redis cache (Phase 1) — speeds up repeated broker queries.
+	CacheEnabled    bool          // CACHE_ENABLED
+	RedisAddr       string        // REDIS_ADDR
+	RedisTimeout    time.Duration // REDIS_TIMEOUT_MS (short = fast graceful fallback)
+	CacheTTLUrgent  time.Duration // CACHE_TTL_URGENT_SEC
+	CacheTTLNormal  time.Duration // CACHE_TTL_NORMAL_SEC
+	CacheTTLInsight time.Duration // CACHE_TTL_INSIGHT_SEC
 }
 
 // Load reads the environment and returns a Config tuned for a low-RAM,
@@ -71,6 +79,13 @@ func Load() Config {
 
 		ServerAddr:      envStr("BROKER_ADDR", "127.0.0.1:8088"),
 		MaxHistoryTurns: envInt("BROKER_MAX_HISTORY", 8),
+
+		CacheEnabled:    envBool("CACHE_ENABLED", true),
+		RedisAddr:       envStr("REDIS_ADDR", "127.0.0.1:6379"),
+		RedisTimeout:    time.Duration(envInt("REDIS_TIMEOUT_MS", 200)) * time.Millisecond,
+		CacheTTLUrgent:  time.Duration(envInt("CACHE_TTL_URGENT_SEC", 300)) * time.Second,
+		CacheTTLNormal:  time.Duration(envInt("CACHE_TTL_NORMAL_SEC", 900)) * time.Second,
+		CacheTTLInsight: time.Duration(envInt("CACHE_TTL_INSIGHT_SEC", 1800)) * time.Second,
 	}
 }
 

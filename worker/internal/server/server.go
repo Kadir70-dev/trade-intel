@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/trade-intel/worker/internal/broker"
+	"github.com/trade-intel/worker/internal/cache"
 	"github.com/trade-intel/worker/internal/config"
 	"github.com/trade-intel/worker/internal/ollama"
 	"github.com/trade-intel/worker/internal/session"
@@ -29,13 +30,14 @@ type Server struct {
 	asst    *broker.Assistant
 	llm     *ollama.Client
 	store   *session.Store
+	cache   *cache.Cache
 	log     *slog.Logger
 	sem     chan struct{} // worker-pool: bounds concurrent inferences
 	clockFn func() time.Time
 }
 
 // New builds a Server. maxConcurrent caps simultaneous LLM turns.
-func New(cfg config.Config, asst *broker.Assistant, llm *ollama.Client, store *session.Store, log *slog.Logger, maxConcurrent int) *Server {
+func New(cfg config.Config, asst *broker.Assistant, llm *ollama.Client, store *session.Store, c *cache.Cache, log *slog.Logger, maxConcurrent int) *Server {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
 	}
@@ -44,6 +46,7 @@ func New(cfg config.Config, asst *broker.Assistant, llm *ollama.Client, store *s
 		asst:    asst,
 		llm:     llm,
 		store:   store,
+		cache:   c,
 		log:     log,
 		sem:     make(chan struct{}, maxConcurrent),
 		clockFn: time.Now,
@@ -56,7 +59,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/chat", s.handleChat)
 	mux.HandleFunc("/chat/stream", s.handleChatStream)
+	mux.HandleFunc("/cache/invalidate", s.handleCacheInvalidate)
 	return mux
+}
+
+// modelFor returns the model used for a request (override or server default),
+// used both for the LLM call and as part of the cache key.
+func (s *Server) modelFor(req chatRequest) string {
+	if req.Model != "" {
+		return req.Model
+	}
+	return s.cfg.Model
 }
 
 type chatRequest struct {
@@ -107,6 +120,24 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"fallback_ready": fallbackOK,
 		"ollama":         ollamaOK,
 		"sessions":       s.store.Count(),
+		"cache_enabled":  s.cache.Enabled(),
+		"cache_healthy":  s.cache.Healthy(),
+	})
+}
+
+// handleCacheInvalidate bumps the cache namespace version so every cached
+// broker reply is orphaned. Call this when inventory changes (the Python ingest
+// path pings it best-effort). O(1) — no SCAN/DEL.
+func (s *Server) handleCacheInvalidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	ver := s.cache.Invalidate()
+	s.log.Info("cache_invalidated", "version", ver)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"invalidated": s.cache.Enabled(),
+		"version":     ver,
 	})
 }
 
@@ -136,6 +167,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.Session = "default"
 	}
 
+	// Cache lookup happens BEFORE the worker-pool: a hit returns instantly and
+	// never waits for an inference slot.
+	sig, urgent := cache.QuerySignature(req.Query)
+	key := s.cache.Key(sig, s.modelFor(req))
+	now := s.clockFn()
+	if cached, ok := s.cache.Get(key); ok {
+		var resp broker.Response
+		if json.Unmarshal([]byte(cached), &resp) == nil {
+			resp.Cached = true
+			s.store.Append(req.Session, req.Query, resp.Answer, now)
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Timeout+10*time.Second)
 	defer cancel()
 	if !s.acquire(ctx) {
@@ -144,7 +190,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release()
 
-	now := s.clockFn()
 	history := s.store.History(req.Session, now)
 	resp, err := s.asst.WithModel(req.Model).Answer(ctx, req.Query, history)
 	if err != nil {
@@ -153,6 +198,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Append(req.Session, req.Query, resp.Answer, now)
+	// Cache the full reply (answer + ranking + WhatsApp) for repeat queries.
+	if payload, mErr := json.Marshal(resp); mErr == nil {
+		s.cache.SetEx(key, string(payload), s.cache.TTLFor(urgent))
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -175,6 +224,31 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	sig, urgent := cache.QuerySignature(req.Query)
+	key := s.cache.Key(sig, s.modelFor(req))
+	now := s.clockFn()
+
+	// Cache hit: replay the stored reply instantly (one token chunk + done),
+	// no worker-pool slot, no inference.
+	if cached, ok := s.cache.Get(key); ok {
+		var resp broker.Response
+		if json.Unmarshal([]byte(cached), &resp) == nil {
+			resp.Cached = true
+			sseEvent(w, "status", "cached")
+			sseEvent(w, "token", resp.Answer)
+			flusher.Flush()
+			s.store.Append(req.Session, req.Query, resp.Answer, now)
+			payload, _ := json.Marshal(resp)
+			sseEvent(w, "done", string(payload))
+			flusher.Flush()
+			return
+		}
+	}
+
 	// No artificial wall-clock deadline on streaming: the Ollama client's
 	// idle-timeout watchdog handles stalls, num_predict bounds length, and
 	// r.Context() cancels if the client disconnects.
@@ -185,15 +259,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	// Flush headers + a status event immediately so the client connects right
 	// away and shows progress while the model evaluates (CPU TTFT can be long).
 	sseEvent(w, "status", "thinking")
 	flusher.Flush()
 
-	now := s.clockFn()
 	history := s.store.History(req.Session, now)
 	resp, err := s.asst.WithModel(req.Model).AnswerStream(ctx, req.Query, history, func(chunk string) {
 		sseEvent(w, "token", chunk)
@@ -205,6 +275,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Append(req.Session, req.Query, resp.Answer, now)
+	if payload, mErr := json.Marshal(resp); mErr == nil {
+		s.cache.SetEx(key, string(payload), s.cache.TTLFor(urgent))
+	}
 	payload, _ := json.Marshal(resp)
 	sseEvent(w, "done", string(payload))
 	flusher.Flush()

@@ -29,6 +29,7 @@ type Response struct {
 	Model      string            `json:"model,omitempty"`
 	TokensSec  float64           `json:"tokens_per_sec,omitempty"`
 	Note       string            `json:"note,omitempty"`
+	Cached     bool              `json:"cached"`
 }
 
 // Assistant ties the facts bridge and the Ollama client together.

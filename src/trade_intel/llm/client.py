@@ -6,7 +6,7 @@ over its REST API. No paid APIs, no SDK: just ``urllib``.
 Design goals (cheap-VPS / low-RAM target):
 
 - **CPU-friendly**: passes ``num_thread`` + ``num_ctx`` + ``num_predict``
-  options so a $5–10 VPS can run qwen3:4b without thrashing.
+  options so a $5-10 VPS can run qwen3:4b without thrashing.
 - **Low-RAM**: short ``keep_alive`` unloads the model between bursts; a small
   ``num_ctx`` keeps the KV-cache tiny.
 - **Resilient**: a primary model that 404s (not pulled) transparently falls
@@ -101,7 +101,8 @@ class OllamaClient:
         url = f"{self.host}{path}"
         try:
             with urllib.request.urlopen(url, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                data = json.loads(resp.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
         except urllib.error.URLError as e:  # connection refused / DNS / timeout
             raise OllamaError(
                 f"cannot reach Ollama at {self.host} ({e}). "

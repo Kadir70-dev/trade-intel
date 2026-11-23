@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/trade-intel/worker/internal/broker"
+	"github.com/trade-intel/worker/internal/cache"
 	"github.com/trade-intel/worker/internal/config"
 	"github.com/trade-intel/worker/internal/facts"
 	"github.com/trade-intel/worker/internal/ollama"
@@ -74,11 +75,19 @@ func main() {
 	bridge := &facts.Bridge{PythonBin: cfg.PythonBin, Script: cfg.FactsScript, WorkDir: wd}
 	asst := broker.New(cfg, bridge, llm)
 	store := session.NewStore(cfg.MaxHistoryTurns)
+	cch := cache.New(cache.Config{
+		Enabled:    cfg.CacheEnabled,
+		Addr:       cfg.RedisAddr,
+		Timeout:    cfg.RedisTimeout,
+		TTLUrgent:  cfg.CacheTTLUrgent,
+		TTLNormal:  cfg.CacheTTLNormal,
+		TTLInsight: cfg.CacheTTLInsight,
+	})
 
 	mode := flag.Arg(0)
 	switch mode {
 	case "serve":
-		srv := server.New(cfg, asst, llm, store, logger, *maxConc)
+		srv := server.New(cfg, asst, llm, store, cch, logger, *maxConc)
 		if err := srv.ListenAndServe(); err != nil {
 			fmt.Fprintln(os.Stderr, "server error:", err)
 			os.Exit(1)
