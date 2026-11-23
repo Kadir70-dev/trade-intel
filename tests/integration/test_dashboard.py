@@ -156,3 +156,25 @@ def test_chat_proxy_502_when_broker_down(env: None, monkeypatch: pytest.MonkeyPa
     c = TestClient(create_app(), headers={"X-API-Key": "k-test"})
     assert c.post("/chat/stream", json={"query": "x"}).status_code == 502
     assert c.post("/chat/stream", json={"query": ""}).status_code == 422
+
+
+def test_cors_only_for_configured_origin(env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CORS_ORIGINS", "https://ui.example.app")
+    from trade_intel.config import get_settings
+
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    ok = c.options(
+        "/dashboard/summary",
+        headers={
+            "Origin": "https://ui.example.app",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-api-key",
+        },
+    )
+    assert ok.headers.get("access-control-allow-origin") == "https://ui.example.app"
+    bad = c.options(
+        "/dashboard/summary",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"},
+    )
+    assert "access-control-allow-origin" not in bad.headers

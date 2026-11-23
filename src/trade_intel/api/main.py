@@ -38,6 +38,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -139,6 +140,17 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=_lifespan,
     )
+
+    origins = get_settings().cors_origin_list
+    if origins:
+        # Explicit origins only (never "*"): the key travels in a header.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["X-API-Key", "Content-Type"],
+            max_age=600,
+        )
 
     # Public — no auth, used by load balancers / k8s liveness probes.
     @app.get("/healthz", response_model=HealthResponse, tags=["meta"])

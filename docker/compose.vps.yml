@@ -1,0 +1,97 @@
+# Shared-VPS variant (189.72.154.112): no Caddy/Ollama of its own.
+#  - TLS edge  = existing sam-edge Caddy, reaching `trade-intel-api` over the `sam-edge` network
+#  - LLM       = existing Ollama container, reached over `linkedin-copilot_default` (broker only)
+#  - Postgres/Redis/broker are on this stack's private network; NO published ports.
+#
+#   docker compose --env-file .env.prod -f docker/compose.vps.yml up -d --build
+
+x-app-env: &app-env
+  ENVIRONMENT: prod
+  DEBUG: "false"
+  API_RELOAD: "false"
+  POSTGRES_URL: postgresql+psycopg://${POSTGRES_USER:-trade}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trade_intel}
+  API_KEY: ${API_KEY:?set API_KEY}
+  IMPORT_UPLOADERS: ${IMPORT_UPLOADERS:-Main,Yaseen}
+  BROKER_URL: http://broker:8088
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trade}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-trade_intel}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trade} -d ${POSTGRES_DB:-trade_intel}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    networks: [internal]
+
+  migrate:
+    build: { context: .., dockerfile: docker/api.Dockerfile }
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    networks: [internal]
+
+  api:
+    build: { context: .., dockerfile: docker/api.Dockerfile }
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    expose: ["8000"]
+    networks:
+      internal:
+      edge:
+        aliases: [trade-intel-api]
+
+  broker:
+    build: { context: .., dockerfile: docker/broker.Dockerfile }
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      OLLAMA_FALLBACK_MODEL: ${OLLAMA_FALLBACK_MODEL:-qwen2.5:3b}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
+      LLM_KEEP_ALIVE: ${LLM_KEEP_ALIVE:-5m}
+      CACHE_ENABLED: "true"
+      REDIS_ADDR: redis:6379
+      BROKER_ADDR: 0.0.0.0:8088
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+    expose: ["8088"]
+    networks:
+      internal:
+      llm:
+        aliases: [ollama]
+
+networks:
+  internal:
+  edge:
+    external: true
+    name: sam-edge
+  llm:
+    external: true
+    name: linkedin-copilot_default
+
+volumes:
+  postgres-data:

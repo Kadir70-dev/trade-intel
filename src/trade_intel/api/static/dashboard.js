@@ -2,6 +2,9 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const KEY = "ti_api_key";
+  // Empty when served by the API itself; set via <meta name="ti-api"> on the Vercel build.
+  const meta = document.querySelector('meta[name="ti-api"]');
+  const API = ((meta && meta.content) || "").replace(/\/+$/, "");
   let apiKey = "";
   try { apiKey = sessionStorage.getItem(KEY) || ""; } catch (_) { /* storage blocked */ }
 
@@ -14,7 +17,7 @@
 
   async function api(path, opts = {}) {
     const headers = Object.assign({ "X-API-Key": apiKey }, opts.headers || {});
-    const res = await fetch(path, Object.assign({}, opts, { headers }));
+    const res = await fetch(API + path, Object.assign({}, opts, { headers }));
     if (res.status === 401) { signOut(); throw new Error("Invalid API key"); }
     return res;
   }

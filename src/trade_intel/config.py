@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     )
     max_upload_mb: int = Field(default=25, ge=1, le=200)
     broker_url: str = "http://127.0.0.1:8088"
+    #: Comma-separated browser origins allowed to call the API (e.g. the Vercel UI).
+    cors_origins: str = ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def uploader_names(self) -> list[str]:
