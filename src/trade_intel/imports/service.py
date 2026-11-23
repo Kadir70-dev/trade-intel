@@ -13,6 +13,7 @@ from typing import Protocol
 
 from sqlalchemy import select
 
+from trade_intel.analysis.builder import build_items
 from trade_intel.core.logging import get_logger
 from trade_intel.db import session_scope
 from trade_intel.db.models import Demand, ImportRecord, SourceType
@@ -205,6 +206,11 @@ def run_matching(import_id: int | None = None) -> int:
     caller's response path — failures are recorded on the import row.
     """
     written = 0
+    try:
+        with session_scope() as session:
+            build_items(session)
+    except Exception:
+        log.exception("build_items_failed", import_id=import_id)
     try:
         embedder = HashEmbedder()
         now = datetime.now(UTC).replace(tzinfo=None)

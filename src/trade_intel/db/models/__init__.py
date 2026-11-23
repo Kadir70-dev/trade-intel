@@ -20,6 +20,7 @@ from trade_intel.db.models.inventory import Inventory
 from trade_intel.db.models.lead_pipeline import LeadPipeline
 from trade_intel.db.models.match import Match
 from trade_intel.db.models.message import Message
+from trade_intel.db.models.message_item import MessageItem
 from trade_intel.db.models.mixins import CreatedAtMixin, TimestampMixin
 from trade_intel.db.models.seller import Seller
 
@@ -38,6 +39,7 @@ __all__ = [
     "Match",
     "MatchType",
     "Message",
+    "MessageItem",
     "PipelineStage",
     "Priority",
     "Seller",

@@ -78,6 +78,8 @@ ignore = ["E501"]
 "tests/unit/test_normalization_products.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/unit/test_intent_classifier.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/unit/test_property_based.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/unit/test_analysis_specs.py" = ["RUF001", "RUF002", "RUF003"]
+"src/trade_intel/analysis/specs.py" = ["RUF001", "RUF002", "RUF003"]
 # Typer's idiomatic API uses `typer.Argument(...)` / `typer.Option(...)` calls in
 # function defaults. Ruff's B008 flags this as a code smell, but it's the
 # Typer-recommended pattern — opt out for the CLI module only.

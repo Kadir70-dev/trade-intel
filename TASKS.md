@@ -99,6 +99,8 @@ _(none)_
 - [x] **P9.5** `POST /chat/stream` SSE proxy to the Go broker (Ollama); broker skips the LLM when there are zero candidates, so chat stays grounded in imported data
 - [x] **P9.6** VPS stack: `docker/compose.prod.yml` (only Caddy publishes 80/443; postgres/redis/broker/ollama/api internal), `docker/broker.Dockerfile`, `docker/Caddyfile` (auto-HTTPS, SSE flush), `.env.prod.example`; constant-time API-key compare
 - [x] **P9.8** DEPLOYED 2026-11-23: API stack on VPS 189.72.154.112 (`/opt/trade-intel`, project `trade-intel`, `docker/compose.vps.yml`) behind shared sam-edge Caddy at https://trade-intel.189.72.154.112.sslip.io (Let's Encrypt); static UI on Vercel https://trade-intel-ui.vercel.app (`scripts/build_vercel_ui.sh`, CORS_ORIGINS locked to it); reuses VPS Ollama (qwen2.5:3b)
+- [x] **P10.1** Requirement extractor `analysis/specs.py` (RAM/SSD/HDD/laptops/batteries/phones; Unicode-bold, "want to sale" fix, multi-line laptop blocks, reposts de-duplicated), `message_items` table (migration b7e21f4c5a90), explainable matcher `analysis/matching.py`, `/analytics/*` endpoints
+- [x] **P10.2** Next.js CRM UI in `web/` (Vercel `trade-intel-ui`): overview charts, opportunities, exact requirements + original messages, buyer/seller profiles, imports (drag-drop, zip), AI broker chat
 - [x] **P9.7** Tests: `tests/integration/test_dashboard.py` (8), Go `broker_test.go`
 
 ## BLOCKED

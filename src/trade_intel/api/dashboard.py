@@ -16,9 +16,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from trade_intel.analysis import queries as analytics
+from trade_intel.analysis.builder import build_items
 from trade_intel.config import get_settings
 from trade_intel.core.logging import get_logger
-from trade_intel.db import get_db
+from trade_intel.db import get_db, session_scope
 from trade_intel.db.models import (
     Buyer,
     Demand,
@@ -155,6 +157,56 @@ def dashboard_router() -> APIRouter:
                 }
             )
         return out
+
+    # ----- structured requirement analytics (Phase 10) -----
+
+    @router.get("/analytics/overview")
+    def analytics_overview(
+        days: int = Query(default=60, ge=1, le=730), db: Session = Depends(get_db)
+    ) -> dict[str, object]:
+        return analytics.overview(db, days)
+
+    @router.get("/analytics/requirements")
+    def analytics_requirements(
+        side: str | None = Query(default=None, pattern="^(buy|sell)$"),
+        category: str | None = Query(default=None, max_length=16),
+        q: str | None = Query(default=None, max_length=80),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        db: Session = Depends(get_db),
+    ) -> dict[str, object]:
+        rows = analytics.deduped(db, side=side, category=category, q=q)
+        return {"total": len(rows), "items": rows[offset : offset + limit]}
+
+    @router.get("/analytics/traders")
+    def analytics_traders(
+        role: str | None = Query(default=None, pattern="^(buyer|seller)$"),
+        db: Session = Depends(get_db),
+    ) -> list[dict[str, object]]:
+        return analytics.traders(db, role)
+
+    @router.get("/analytics/trader")
+    def analytics_trader(
+        key: str = Query(min_length=1, max_length=64), db: Session = Depends(get_db)
+    ) -> dict[str, object]:
+        d = analytics.trader_detail(db, key)
+        if d is None:
+            raise HTTPException(status_code=404, detail="trader not found")
+        return d
+
+    @router.get("/analytics/opportunities")
+    def analytics_opportunities(
+        min_score: int = Query(default=40, ge=0, le=100),
+        category: str | None = Query(default=None, max_length=16),
+        limit: int = Query(default=100, ge=1, le=500),
+        db: Session = Depends(get_db),
+    ) -> list[dict[str, object]]:
+        return analytics.opportunities(db, min_score=min_score, limit=limit, category=category)
+
+    @router.post("/analytics/rebuild")
+    def analytics_rebuild() -> dict[str, int]:
+        with session_scope() as session:  # get_db sessions are read-only (no commit)
+            return {"items_written": build_items(session, rebuild=True)}
 
     @router.post("/chat/stream")
     async def chat_stream(body: ChatRequest) -> StreamingResponse:

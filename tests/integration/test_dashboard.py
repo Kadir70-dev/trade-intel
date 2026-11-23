@@ -219,3 +219,44 @@ def test_zip_without_text_or_corrupt_is_rejected(client: TestClient) -> None:
     assert no_txt.status_code == 422
     bad = client.post("/ingest", files={"file": ("c.zip", b"junk")}, data={"uploader": "Main"})
     assert bad.status_code == 422
+
+
+_CHAT = (
+    "22/11/26, 10:00 - +971 50 111 1111: WTB\n16GB Samsung PC4\n512 nvme 80+ health\n"
+    "22/11/26, 10:05 - +971 50 222 2222: Want to sale\n16gb pc4 3200 samsung\n40pcs\n"
+    "22/11/26, 10:06 - +971 50 333 3333: WTS\n512gb nvme 80 to 100 health\n10pcs\n"
+    "22/11/26, 10:07 - +971 50 111 1111: WTB\n16GB Samsung PC4\n"
+)
+
+
+def test_analytics_endpoints_end_to_end(client: TestClient) -> None:
+    r = client.post(
+        "/ingest",
+        params={"run_matcher": "true"},
+        files={"file": ("chat.txt", _CHAT.encode())},
+        data={"uploader": "Main"},
+    )
+    assert r.status_code == 201, r.text
+    ov = client.get("/analytics/overview").json()
+    assert ov["kpis"]["buyers"] == 1 and ov["kpis"]["sellers"] == 2
+    assert ov["kpis"]["requirements"] == 2  # repost of 16GB PC4 de-duplicated
+    cats = {c["category"] for c in ov["categories"]}
+    assert {"RAM", "SSD"} <= cats
+
+    reqs = client.get("/analytics/requirements", params={"side": "buy", "category": "RAM"}).json()
+    assert reqs["total"] == 1
+    item = reqs["items"][0]
+    assert item["reposts"] == 2 and item["capacity_gb"] == 16 and item["brand"] == "Samsung"
+    assert "16GB Samsung PC4" in item["message_text"]
+
+    opps = client.get("/analytics/opportunities").json()
+    assert {o["category"] for o in opps} == {"RAM", "SSD"}
+    assert all(o["buyer"]["key"] == "+971501111111" for o in opps)
+    assert all(o["draft"].startswith("Salam") for o in opps)
+
+    ts = client.get("/analytics/traders", params={"role": "buyer"}).json()
+    assert [t["key"] for t in ts] == ["+971501111111"]
+    d = client.get("/analytics/trader", params={"key": "+971501111111"}).json()
+    assert len(d["requirements"]) == 2 and d["opportunities"]
+    assert client.get("/analytics/trader", params={"key": "nobody"}).status_code == 404
+    assert client.post("/analytics/rebuild").json()["items_written"] >= 4
