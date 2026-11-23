@@ -178,3 +178,44 @@ def test_cors_only_for_configured_origin(env: None, monkeypatch: pytest.MonkeyPa
         headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"},
     )
     assert "access-control-allow-origin" not in bad.headers
+
+
+def _zip_of(path: Path, extra: dict[str, bytes] | None = None) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("WhatsApp Chat - SSD AND RAM.txt", path.read_bytes())
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_whatsapp_zip_export_is_imported(client: TestClient) -> None:
+    blob = _zip_of(WA, {"IMG-0001.jpg": b"\xff\xd8" * 50, "../evil.txt": b"x"})
+    r = client.post(
+        "/ingest",
+        files={"file": ("WhatsApp Chat with SSD AND RAM 💯.zip", blob)},
+        data={"uploader": "Yaseen"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["stats"]["messages_inserted"] > 0
+    assert r.json()["source_type"] == "whatsapp"
+    row = client.get("/dashboard/imports").json()[0]
+    assert row["filename"].endswith(".zip") and row["format"] == "whatsapp"
+
+
+def test_zip_without_text_or_corrupt_is_rejected(client: TestClient) -> None:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("a.jpg", b"1")
+    no_txt = client.post(
+        "/ingest", files={"file": ("c.zip", buf.getvalue())}, data={"uploader": "Main"}
+    )
+    assert no_txt.status_code == 422
+    bad = client.post("/ingest", files={"file": ("c.zip", b"junk")}, data={"uploader": "Main"})
+    assert bad.status_code == 422

@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import tempfile
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -73,6 +74,43 @@ async def spool_upload(
         path.unlink(missing_ok=True)
         raise
     return path, digest.hexdigest(), size
+
+
+def extract_chat_from_zip(zip_path: Path, *, max_bytes: int) -> Path:
+    """Pull the single WhatsApp chat ``.txt`` out of an export ``.zip``.
+
+    Media and every other member are ignored and never written to disk.
+    The member is streamed into a server-named temp file with a hard cap on
+    *decompressed* bytes (zip-bomb guard); member names are never used as paths.
+    Raises ``ValueError`` if the archive is unreadable or has no chat text.
+    """
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("not a valid zip archive") from exc
+    with zf:
+        texts = [i for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(".txt")]
+        if not texts:
+            raise ValueError("zip has no .txt chat export inside")
+        member = max(texts, key=lambda i: i.file_size)
+        if member.file_size > max_bytes:
+            raise UploadTooLargeError(f"chat text exceeds {max_bytes // (1024 * 1024)} MB")
+        fd, tmp = tempfile.mkstemp(prefix="ti_chat_", suffix=".txt")
+        out = Path(tmp)
+        try:
+            written = 0
+            with zf.open(member) as src, os.fdopen(fd, "wb") as dst:
+                while chunk := src.read(_CHUNK):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise UploadTooLargeError(
+                            f"chat text exceeds {max_bytes // (1024 * 1024)} MB"
+                        )
+                    dst.write(chunk)
+        except BaseException:
+            out.unlink(missing_ok=True)
+            raise
+    return out
 
 
 def run_import(

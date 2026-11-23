@@ -84,6 +84,7 @@ from trade_intel.db.models import (
 )
 from trade_intel.imports import (
     UploadTooLargeError,
+    extract_chat_from_zip,
     run_import,
     run_matching,
     safe_filename,
@@ -183,6 +184,7 @@ _EXTENSION_TO_TYPE: dict[str, SourceType] = {
     ".csv": SourceType.CSV,
     ".xlsx": SourceType.EXCEL,
     ".xls": SourceType.EXCEL,
+    ".zip": SourceType.WHATSAPP,  # WhatsApp "Export chat" archive
 }
 
 
@@ -243,9 +245,22 @@ def _ingest_router() -> APIRouter:
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="empty file")
 
+        parse_path = tmp_path
+        if display_name.lower().endswith(".zip"):
+            try:
+                parse_path = extract_chat_from_zip(
+                    tmp_path, max_bytes=settings.max_upload_mb * 1024 * 1024 * 4
+                )
+            except UploadTooLargeError as exc:
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+            except ValueError as exc:
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
         try:
             import_id, stats = run_import(
-                tmp_path,
+                parse_path,
                 filename=display_name,
                 source_type=st,
                 uploader=who,
@@ -262,6 +277,7 @@ def _ingest_router() -> APIRouter:
             ) from exc
         finally:
             tmp_path.unlink(missing_ok=True)
+            parse_path.unlink(missing_ok=True)
 
         if run_matcher:
             background.add_task(run_matching, import_id)
